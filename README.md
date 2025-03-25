@@ -16,7 +16,7 @@ url = ("https://aip.baidubce.com/oauth/2.0/token"
        "&client_secret=Uin2fK6r0MklQheJA9Gxgyk6uJ79f7Rz"  # 替换为你的客户端密钥
        "&grant_type=client_credentials")
 ## 运行服务
-在项目根目录下执行以下命令启动 FastAPI 服务：uvicorn main:app --reload这里假设你的代码文件名为 `main.py`，如果文件名不同，请相应修改。
+在项目根目录下执行以下命令启动 FastAPI 服务：uvicorn qianfan:app --reload
 
 ## 使用方法
 向 `http://127.0.0.1:8000/generate_html` 发送 POST 请求，请求体为 JSON 格式，包含 `content` 字段，示例如下：{
