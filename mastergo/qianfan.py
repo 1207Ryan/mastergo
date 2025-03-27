@@ -1,289 +1,321 @@
 import re
-
-import requests
 import json
+from typing import Dict, List, Optional, Tuple, Any
+import requests
 from fastapi import FastAPI
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 
 app = FastAPI()
 
 class ChatRequest(BaseModel):
     content: str
 
-# 存储对话历史和HTML片段
-conversation_history = []
-html_parts = {}  # 存储解析后的HTML部分
+class HTMLModifier:
+    """处理HTML生成和修改的核心类"""
 
-# 增强版关键词映射
-KEYWORD_MAPPING = {
-    '头部': 'head'，
-    '页面标题': 'title'，
-    '内容标题': 'h1'，  # 默认映射到h1
-    '主标题': 'h1'，
-    '二级标题': 'h2'，
-    '三级标题': 'h3'，
-    '主体': 'body'，
-    '导航栏': 'nav'，
-    '导航': 'nav'，
-    '菜单': 'nav'，
-    '页脚': 'footer'，
-    '底部': 'footer'，
-    '脚本': 'scripts'，
-    '样式': 'styles'，
-    '段落': 'paragraphs'，
-    '链接': 'links'，
-    '图片': 'images'，
-    '产品标题': '.product h3'，  # 特定类下的标题
-    '全部': '全部'
-}
+    def __init__(self):
+        self.conversation_history: List[Dict[str, str]] = []
+        self.html_parts: Dict[str, Any] = {}
+        self.keyword_mapping = {
+            '头部': 'head',
+            '页面标题': 'title',
+            '内容标题': 'h1',
+            '主标题': 'h1',
+            '二级标题': 'h2',
+            '三级标题': 'h3',
+            '主体': 'body',
+            '导航栏': 'nav',
+            '导航': 'nav',
+            '菜单': 'nav',
+            '页脚': 'footer',
+            '底部': 'footer',
+            '脚本': 'scripts',
+            '样式': 'styles',
+            '段落': 'paragraphs',
+            '链接': 'links',
+            '图片': 'images',
+            '产品标题': '.product h3',
+            '全部': '全部'
+        }
 
-def parse_html(html_content):
-    """解析HTML并提取关键部分（增强版）"""
-    soup = BeautifulSoup(html_content, 'html.parser')
+    PROMPT_TEMPLATE = """
+        请根据以下要求修改HTML内容：
+        需要修改的内容:
+        {elements}
 
-    parts = {
-        'head': str(soup.head) if soup.head else ""，
-        'title': soup.title。string if soup.title else "无页面标题"，
-        'h1': [str(h) for h in soup.find_all('h1')]，
-        'h2': [str(h) for h in soup.find_all('h2')]，
-        'h3': [str(h) for h in soup.find_all('h3')]，
-        'nav': [str(nav) for nav in soup.find_all('nav')]，
-        'footer': str(soup.footer) if soup.footer else ""，
-        'body': str(soup.body) if soup.body else ""，
-        'scripts': [str(script) for script in soup.find_all('script')]，
-        'styles': [str(style) for style in soup.find_all('style')]，
-        'paragraphs': [str(p) for p in soup.find_all('p')]，
-        'links': [str(a) for a in soup.find_all('a')]，
-        'images': [str(img) for img in soup.find_all('img')]，
-        '.product h3': [str(h3) for h3 in soup.select('.product h3')]
-    }
+        修改要求:
+        {request}
 
-    # 智能识别导航和页脚
-    if not parts['nav']:
-        parts['nav'] = [str(div) for div in soup.find_all(class_=['nav'， 'navbar'， 'navigation'])]
-    if not parts['footer']:
-        footer_div = soup.find(class_=['footer'， 'bottom'])
-        if footer_div:
-            parts['footer'] = str(footer_div)
+        重要说明：
+        1. 保持元素的基本HTML结构不变
+        2. 只需返回修改后的完整HTML代码
+        3. 用```html...```包裹返回内容
 
-    return parts
+        示例：
+        ```html
+        {example}
+        ```
+        """
 
-def get_access_token():
-    url = "https://aip.baidubce.com/oauth/2.0/token?client_id=jC0epDHTtFr1CyUjwwg1fxrl&client_secret=Uin2fK6r0MklQheJA9Gxgyk6uJ79f7Rz&grant_type=client_credentials"
-    payload = json.dumps("")
-    headers = {'Content-Type': 'application/json'}
-    response = requests.post(url, headers=headers, data=payload)
-    return response.json()['access_token']
+    DEFAULT_EXAMPLE = """<div class="modified-example">
+      <h2>修改后的内容示例</h2>
+      <p>这是一个修改后的HTML示例</p>
+    </div>"""
 
-def chat(content):
-    global conversation_history
-    conversation_history.append({"role": "user"， "content": content})
+    def clear_history(self):
+        """清空对话历史和HTML解析结果"""
+        self.conversation_history = []
+        self.html_parts = {}
 
-    payload = json.dumps({
-        "messages": conversation_history,
-        "temperature": 0.5
-    })
+    def get_access_token(self) -> str:
+        """获取百度API的访问令牌"""
+        url = "https://aip.baidubce.com/oauth/2.0/token"
+        params = {
+            "client_id": "jC0epDHTtFr1CyUjwwg1fxrl",
+            "client_secret": "Uin2fK6r0MklQheJA9Gxgyk6uJ79f7Rz",
+            "grant_type": "client_credentials"
+        }
+        response = requests.post(url, params=params)
+        return response.json()['access_token']
 
-    url = f"https://aip.baidubce.com/rpc/2.0/ai_custom/v1/wenxinworkshop/chat/completions_pro?access_token={get_access_token()}"
-    response = requests.post(url, headers={'Content-Type': 'application/json'}, data=payload)
-    return response.json()['result']
+    def chat(self, content: str) -> str:
+        """与AI聊天并获取响应"""
+        self.conversation_history.append({"role": "user", "content": content})
 
-def extract_content_keywords(text, html_content):
-    """增强版文本内容关键词提取"""
-    soup = BeautifulSoup(html_content, 'html.parser')
+        payload = json.dumps({
+            "messages": self.conversation_history,
+            "temperature": 0.5
+        })
 
-    # 获取所有包含文本的元素
-    text_elements = []
-    for element in soup.find_all(text=True):
-        if element.parent。name not in ['script'， 'style'] 和 element.strip():
-            text_elements.append({
-                'text': element.strip()，
-                'element': element.parent，
-                'full_text': str(element.parent)
-            })
+        url = f"https://aip.baidubce.com/rpc/2.0/ai_custom/v1/wenxinworkshop/chat/completions_pro?access_token={self.get_access_token()}"
+        response = requests.post(url, headers={'Content-Type': 'application/json'}, data=payload)
+        return response.json()['result']
 
-    # 找出用户请求中匹配的文本内容
-    matched_texts = []
-    for item in text_elements:
-        # 检查用户请求是否包含这段文本(部分匹配)
-        if item['text'] in text 或 text in item['text']:
-            matched_texts.append({
-                'text': item['text']，
-                'element': item['element'],
-                'full_text': item['full_text']
-            })
+    def parse_html(self, html_content: str) -> Dict[str, Any]:
+        """解析HTML并提取关键部分"""
+        soup = BeautifulSoup(html_content, 'html.parser')
 
-    return matched_texts
+        parts = {
+            'head': str(soup.head) if soup.head else "",
+            'title': soup.title.string if soup.title else "无页面标题",
+            'h1': [str(h) for h in soup.find_all('h1')],
+            'h2': [str(h) for h in soup.find_all('h2')],
+            'h3': [str(h) for h in soup.find_all('h3')],
+            'nav': [str(nav) for nav in soup.find_all('nav')],
+            'footer': str(soup.footer) if soup.footer else "",
+            'body': str(soup.body) if soup.body else "",
+            'scripts': [str(script) for script in soup.find_all('script')],
+            'styles': [str(style) for style in soup.find_all('style')],
+            'paragraphs': [str(p) for p in soup.find_all('p')],
+            'links': [str(a) for a in soup.find_all('a')],
+            'images': [str(img) for img in soup.find_all('img')],
+            '.product h3': [str(h3) for h3 in soup.select('.product h3')]
+        }
 
-def extract_chinese_keywords(text, html_content=None):
-    """增强版关键词提取，现在支持文本内容作为关键词"""
-    # 首先尝试匹配HTML中的具体文本内容
-    if html_content:
-        content_keywords = extract_content_keywords(text, html_content)
-        if content_keywords:
-            return content_keywords
+        # 智能识别导航和页脚
+        if not parts['nav']:
+            parts['nav'] = [str(div) for div in soup.find_all(class_=['nav', 'navbar', 'navigation'])]
+        if not parts['footer']:
+            footer_div = soup.find(class_=['footer', 'bottom'])
+            if footer_div:
+                parts['footer'] = str(footer_div)
 
-    # 原有逻辑保持不变
-    if '全部' in text or '完整' in text or '整个' in text:
-        return ['全部']
+        return parts
 
-    # 特殊处理"内容标题"请求
-    if '内容标题' in text or ('标题' in text and '内容' in text):
-        return ['h1', 'header h1']  # 同时匹配普通h1和header中的h1
+    def extract_content_keywords(self, text: str, html_content: str) -> List[Dict[str, Any]]:
+        """从HTML内容中提取与用户输入文本相匹配的关键词及其相关信息"""
+        soup = BeautifulSoup(html_content, 'html.parser')
+        text_elements = []
 
-    level_mapping = {
-        '一级标题': 'h1',
-        '二级标题': 'h2',
-        '三级标题': 'h3',
-        '产品标题': '.product h3'
-    }
+        for element in soup.find_all(text=True):
+            if element.parent.name not in ['script', 'style'] and element.strip():
+                text_elements.append({
+                    'text': element.strip(),
+                    'element': element.parent,
+                    'full_text': str(element.parent)
+                })
 
-    for phrase, tag in level_mapping.items():
-        if phrase in text:
-            return [tag]
+        matched_texts = []
+        for item in text_elements:
+            if item['text'] in text or text in item['text']:
+                matched_texts.append({
+                    'text': item['text'],
+                    'element': item['element'],
+                    'full_text': item['full_text']
+                })
 
-    if ('产品' in text and ('标题' in text or '名称' in text)) or '产品标题' in text:
-        return ['.product h3']
+        return matched_texts
 
-    found_keywords = []
-    for chinese_key, english_key in KEYWORD_MAPPING.items():
-        if chinese_key in text:
-            found_keywords.append(english_key)
+    def extract_chinese_keywords(self, text: str, html_content: Optional[str] = None) -> List[str]:
+        """提取中文关键词,如果没有提取到任何关键词，默认返回['全部']"""
+        if html_content:
+            content_keywords = self.extract_content_keywords(text, html_content)
+            if content_keywords:
+                return content_keywords
 
-    return found_keywords if found_keywords else ['h1']
+        if '全部' in text or '完整' in text or '整个' in text:
+            return ['全部']
 
-# 增强版文本定位
-def find_text_positions(html, target_text):
-    soup = BeautifulSoup(html, 'html.parser')
-    matches = []
+        if '内容标题' in text or ('标题' in text and '内容' in text):
+            return ['h1', 'header h1']
 
-    for element in soup.find_all(text=lambda t: target_text in str(t)):
-        parent = element.parent
-        full_text = str(parent)
-        start_pos = html.find(full_text)
+        level_mapping = {
+            '一级标题': 'h1',
+            '二级标题': 'h2',
+            '三级标题': 'h3',
+            '产品标题': '.product h3'
+        }
 
-        if start_pos != -1:
-            matches.append({
-                'start': start_pos,
-                'end': start_pos + len(full_text),
-                'full_text': full_text,
-                'element': element
-            })
+        for phrase, tag in level_mapping.items():
+            if phrase in text:
+                return [tag]
 
-    return matches
+        if ('产品' in text and ('标题' in text or '名称' in text)) or '产品标题' in text:
+            return ['.product h3']
 
-#增强版指令解析
-def parse_modification_command(cmd):
-    # 支持多种指令格式
-    patterns = [
-        r"将['\"](.*?)['\"]改为['\"](.*?)['\"]",  # 将"x"改为"y"
-        r"将(.*?)修改为(.*?)$",  # 将x修改为y
-        r"将(.*?)改为(.*?)$",  # 将x改为y
-        r"把(.*?)改成(.*?)$"  # 把x改成y
-    ]
+        found_keywords = []
+        for chinese_key, english_key in self.keyword_mapping.items():
+            if chinese_key in text:
+                found_keywords.append(english_key)
 
-    for pattern in patterns:
-        match = re.search(pattern, cmd)
-        if match:
-            return match.group(1).strip(), match.group(2).strip()
+        return found_keywords if found_keywords else ['全部']
 
-    # 默认处理（最后兜底）
-    if "改为" in cmd:
-        parts = cmd.split("改为")
-        return parts[0].replace("将", "").strip(), parts[1].strip()
-    elif "修改为" in cmd:
-        parts = cmd.split("修改为")
-        return parts[0].replace("将", "").strip(), parts[1].strip()
+    def find_text_positions(self, html: str, target_text: str) -> List[Dict[str, Any]]:
+        """查找文本位置"""
+        soup = BeautifulSoup(html, 'html.parser')
+        matches = []
 
-    return None, None
+        for element in soup.find_all(text=lambda t: target_text in str(t)):
+            parent = element.parent
+            full_text = str(parent)
+            start_pos = html.find(full_text)
 
-def extract_modification_params(request_content):
-    """正确解析修改指令，返回 (查找文本, 替换文本)"""
-    # 支持多种指令格式
-    patterns = [
-        r"将['\"](.*?)['\"]改为['\"](.*?)['\"]",  # 将"x"改为"y"
-        r"将(.*?)修改为(.*?)$",  # 将x修改为y
-        r"将(.*?)改为(.*?)$",  # 将x改为y
-        r"把(.*?)改成(.*?)$"  # 把x改成y
-    ]
+            if start_pos != -1:
+                matches.append({
+                    'start': start_pos,
+                    'end': start_pos + len(full_text),
+                    'full_text': full_text,
+                    'element': element
+                })
 
-    for pattern in patterns:
-        match = re.search(pattern, request_content)
-        if match:
-            return match.group(1).strip(), match.group(2).strip()
+        return matches
 
-    # 如果都不匹配，尝试简单分割
-    if "改为" in request_content:
-        parts = request_content.split("改为")
-        return parts[0]。replace("将"， "")。strip(), parts[1]。strip()
-    elif "修改为" in request_content:
-        parts = request_content.split("修改为")
-        return parts[0]。replace("将"， "")。strip(), parts[1]。strip()
+    def parse_modification_command(self, cmd: str) -> Tuple[Optional[str], Optional[str]]:
+        """解析修改指令"""
+        patterns = [
+            r"将['\"](.*?)['\"]改为['\"](.*?)['\"]",
+            r"将(.*?)修改为(.*?)$",
+            r"将(.*?)改为(.*?)$",
+            r"把(.*?)改成(.*?)$"
+        ]
 
-    return None， None
+        for pattern in patterns:
+            match = re.search(pattern, cmd)
+            if match:
+                return match.group(1).strip(), match.group(2).strip()
 
-@app.post("/generate_html")
-async def generate_html(request: ChatRequest):
-    global html_parts
-    #清空历史记录
-    conversation_history.clear()
-    html_parts.clear()
+        if "改为" in cmd:
+            parts = cmd.split("改为")
+            return parts[0].replace("将", "").strip(), parts[1].strip()
+        elif "修改为" in cmd:
+            parts = cmd.split("修改为")
+            return parts[0].replace("将", "").strip(), parts[1].strip()
 
-    content = request.content + "，请返回一个完整的html文件"
-    text = chat(content)
+        return None, None
 
-    if "```" in text:
-        html_code = text.split("```")[1]。strip()
+    def generate_html(self, request_content: str) -> str:
+        """生成HTML文件"""
+        self.clear_history()
+        content = f"{request_content}，请返回一个完整的html文件"
+        text = self.chat(content)
+
+        if "```" not in text:
+            raise ValueError("未检测到有效的HTML代码块")
+
+        html_code = text.split("```")[1].strip()
         if html_code.startswith("html"):
-            html_code = html_code[4:]。strip()
+            html_code = html_code[4:].strip()
 
-        # 解析HTML并存储各部分
-        html_parts = parse_html(html_code)
+        self.html_parts = self.parse_html(html_code)
 
-        # 保存完整HTML文件
-        with open('output.html'， 'w', encoding='utf-8') as f:
+        with open('output.html', 'w', encoding='utf-8') as f:
             f.write(html_code)
 
-        return PlainTextResponse("HTML文件已生成并解析完成。")
-    else:
-        return PlainTextResponse("未检测到有效的HTML代码块。")
+        return "HTML文件已生成并解析完成。"
 
+    def modify_html_part(self, request_content: str) -> str:
+        """修改HTML部分内容"""
+        try:
+            with open('output.html', 'r', encoding='utf-8') as f:
+                current_html = f.read()
+        except Exception as e:
+            raise IOError(f"读取HTML文件失败: {str(e)}")
 
-@app.post("/modify_html_part")
-async def modify_html_part(request: ChatRequest):
-    global html_parts
+        # 尝试解析为文本修改指令
+        target_text, new_text = self.parse_modification_command(request_content)
 
-    print(f"收到修改请求: {request.content}")  # 调试日志
+        if target_text and new_text:
+            try:
+                modify_result = self._modify_text_content(current_html, target_text, new_text)
+                if modify_result == "文本内容修改成功！":
+                    return modify_result
+            except Exception as e:
+                # 文本修改失败，继续尝试其他方式
+                pass
 
-    try:
-        with open('output.html'， 'r', encoding='utf-8') as f:
-            current_html = f.read()
-    except Exception as e:
-        print(f"读取文件失败: {str(e)}")
-        return PlainTextResponse(f"读取HTML文件失败: {str(e)}")
+        # 尝试HTML结构修改
+        try:
+            modify_result = self._modify_html_structure(current_html, request_content)
+            if modify_result == "HTML部分修改成功！":
+                return modify_result
+        except Exception as e:
+            # 结构修改失败，继续尝试最后的方式
+            pass
 
-    # 首先尝试解析为"将X改为Y"的文本修改指令
-    target_text, new_text = parse_modification_command(request.content)
+        # 最后尝试：直接传入整个html内容与要求
+        try:
+            prompt = self.PROMPT_TEMPLATE.format(
+                elements=f"整个HTML文档内容:\n{current_html[:1000]}...",  # 限制长度防止过长
+                request=request_content,
+                example=self.DEFAULT_EXAMPLE
+            )
 
-    if target_text 和 new_text:
-        print(f"解析为文本修改指令: 查找'{target_text}' 替换为'{new_text}'")
-        # 执行文本内容修改逻辑
-        matches = find_text_positions(current_html, target_text)
+            modify_result = self.chat(prompt)
+
+            # 统一响应解析逻辑
+            if "```html" in modify_result:
+                updated_html = modify_result.split("```html")[1].split("```")[0].strip()
+            elif "```" in modify_result:
+                updated_html = modify_result.split("```")[1].strip()
+                if updated_html.lower().startswith("html"):
+                    updated_html = updated_html[4:].strip()
+            else:
+                updated_html = modify_result  # 假设整个响应就是HTML
+
+            self._save_updated_html(updated_html)
+            return "HTML修改成功！"
+
+        except Exception as e:
+            return f"修改HTML时出错: {str(e)}"
+
+    def _modify_text_content(self, html: str, target_text: str, new_text: str) -> str:
+        """修改文本内容"""
+        matches = self.find_text_positions(html, target_text)
 
         if not matches:
-            print("尝试模糊匹配...")
-            soup = BeautifulSoup(current_html, 'html.parser')
+            # 尝试模糊匹配
+            soup = BeautifulSoup(html, 'html.parser')
             for element in soup.find_all(text=True):
                 if target_text in str(element):
                     parent = element.parent
                     full_text = str(parent)
-                    start_pos = current_html.find(full_text)
+                    start_pos = html.find(full_text)
                     if start_pos != -1:
                         matches.append({
                             'start': start_pos,
-                            'end': start_pos + len(full_text)，
+                            'end': start_pos + len(full_text),
                             'full_text': full_text,
                             'element': element,
                             'parent': parent
@@ -291,86 +323,104 @@ async def modify_html_part(request: ChatRequest):
                         break
 
         if not matches:
-            # 如果文本匹配失败，回退到HTML部分修改
-            print("文本匹配失败，尝试HTML部分修改")
+            return "未找到匹配的文本内容"
+
+        modified_part = self.chat(self.PROMPT_TEMPLATE.format(
+            element=matches[0]['full_text'],
+            request='将"{target_text}"替换为："{new_text}"',
+            example=f"""```html
+                    {matches[0]['parent'].prettify().split('\n')[0].strip()}
+                    {new_text}
+                    {matches[0]['parent'].prettify().split('\n')[-1].strip()}
+                    ```"""
+        ))
+
+        if "```html" in modified_part:
+            new_part = modified_part.split("```html")[1].split("```")[0].strip()
+        elif "```" in modified_part:
+            new_part = modified_part.split("```")[1].strip()
+            if new_part.lower().startswith("html"):
+                new_part = new_part[4:].strip()
         else:
-            print(f"找到{len(matches)}处文本匹配")
+            return "AI返回格式不正确"
 
-            # 构造文本修改提示
-            modification_prompt = f"""
-            请严格根据以下要求修改HTML内容：
-            需要修改的部分（保持外层标签不变）:
-            {matches[0]['full_text']}
+        # 验证标签是否匹配
+        original_tag = matches[0]['parent'].name
+        if f"<{original_tag}" not in new_part.lower():
+            raise ValueError(f"AI没有保持原标签结构，期望<{original_tag}>标签")
 
-            修改要求：
-            将以下文本：
-            "{target_text}"
-            替换为：
-            "{new_text}"
+        # 执行替换
+        updated_html = html[:matches[0]['start']] + new_part + html[matches[0]['end']:]
 
-            重要说明：
-            1. 只需返回修改后的完整HTML元素
-            2. 必须保持原有的HTML标签结构
-            3. 只修改指定文本，不要改动其他内容
-            4. 用```html包裹返回内容
+        self._save_updated_html(updated_html)
+        return "文本内容修改成功！"
 
-            示例：
-            ```html
-            {matches[0]['parent'].prettify().split('\n')[0].strip()}
-            {new_text}
-            {matches[0]['parent'].prettify().split('\n')[-1].strip()}
-            ```
-            """
+    def _modify_html_structure(self, html: str, request_content: str) -> str:
+        """修改HTML结构"""
+        soup = BeautifulSoup(html, 'html.parser')
+        keywords = self.extract_chinese_keywords(request_content, html)
 
-            print("发送给AI的提示:\n", modification_prompt)
+        if "全部" in keywords:
+            modified_part = self.chat(self.PROMPT_TEMPLATE.format(
+            element=html,
+            request=request_content,
+            example="""````html<h2>修改后的内容</h2>```"""
+            ))
 
-            try:
-                modified_part = chat(modification_prompt)
-                print("AI返回:\n", modified_part)
+            if "```html" in modified_part:
+                updated_html = modified_part.split("```html")[1].split("```")[0].strip()
+            elif "```" in modified_part:
+                updated_html = modified_part.split("```")[1].strip()
+                if updated_html.lower().startswith("html"):
+                    updated_html = updated_html[4:].strip()
+            else:
+                return "AI返回格式不正确"
+        else:
+            elements_to_modify = self._find_elements_to_modify(soup, keywords)
 
-                # 处理AI返回结果
-                if "```html" in modified_part:
-                    new_part = modified_part.split("```html")[1].split("```")[0].strip()
-                elif "```" in modified_part:
-                    new_part = modified_part.split("```")[1].strip()
-                    if new_part.lower().startswith("html"):
-                        new_part = new_part[4:].strip()
-                else:
-                    return PlainTextResponse("AI返回格式不正确")
+            if not elements_to_modify:
+                return "未找到与关键词对应的HTML部分"
 
-                # 验证标签是否匹配
-                original_tag = matches[0]['parent'].name
-                if f"<{original_tag}" not in new_part.lower():
-                    return PlainTextResponse(f"错误：AI没有保持原标签结构，期望<{original_tag}>标签")
+            parts_info = []
+            for element in elements_to_modify:
+                parent = element.find_parent()
+                parent_name = parent.name if parent else '根'
+                parts_info.append(f"""
+                位于{parent_name}中的{element.name}元素:
+                {str(element)}
+                """)
 
-                # 执行替换
-                updated_html = current_html[:matches[0]['start']] + new_part + current_html[matches[0]['end']:]
+            parts_text = "\n".join(parts_info)
 
-                # 保存文件
-                with open('output.html', 'w', encoding='utf-8') as f:
-                    f.write(updated_html)
+            modified_part = self.chat(self.PROMPT_TEMPLATE.format(
+            element=parts_text,
+            request=request_content,
+            example="""````html<h2>修改后的内容</h2>```"""
+            ))
 
-                html_parts = parse_html(updated_html)
-                return PlainTextResponse("文本内容修改成功！")
+            if "```html" in modified_part:
+                new_part = modified_part.split("```html")[1].split("```")[0].strip()
+            elif "```" in modified_part:
+                new_part = modified_part.split("```")[1].strip()
+                if new_part.lower().startswith("html"):
+                    new_part = new_part[4:].strip()
+            else:
+                return "AI返回格式不正确"
 
-            except Exception as e:
-                print(f"AI处理失败: {str(e)}")
+            # 精确替换HTML部分
+            updated_html = html
+            for element in elements_to_modify:
+                if element and str(element) in updated_html:
+                    updated_html = updated_html.replace(str(element), new_part, 1)
+                    break
 
-    # HTML部分修改逻辑（文本修改失败或不是文本修改指令时执行）
-    print("尝试HTML部分修改逻辑")
-    soup = BeautifulSoup(current_html, 'html.parser')
-    keywords = extract_chinese_keywords(request.content)
+        self._save_updated_html(updated_html)
+        return "HTML部分修改成功！"
 
-    if "全部" in keywords:
-        modification_prompt = f"""
-        请根据以下要求修改整个HTML文档：
-        修改要求：
-        {request.content}
-
-        请返回完整的HTML代码，用```html包裹。
-        """
-    else:
+    def _find_elements_to_modify(self, soup: BeautifulSoup, keywords: List[str]) -> List[Tag]:
+        """查找需要修改的元素"""
         elements_to_modify = []
+
         for keyword in keywords:
             if keyword == 'header h1':
                 header = soup.find('header')
@@ -384,7 +434,7 @@ async def modify_html_part(request: ChatRequest):
                     elements_to_modify.extend(main.find_all(keyword))
                 else:
                     elements_to_modify.extend(soup.find_all(keyword))
-            elif keyword in html_parts:
+            elif keyword in self.html_parts:
                 if keyword == 'title':
                     elements_to_modify.append(soup.title)
                 elif keyword == 'head':
@@ -392,93 +442,54 @@ async def modify_html_part(request: ChatRequest):
                 elif keyword == 'body':
                     elements_to_modify.append(soup.body)
                 elif keyword == 'footer':
-                    footer = soup.find('footer') or soup.find(class_=['footer', 'bottom'])
+                    footer = soup.find('footer') 或 soup.find(class_=['footer'， 'bottom'])
                     if footer:
                         elements_to_modify.append(footer)
                 elif keyword == 'nav':
-                    nav = soup.find('nav') or soup.find(class_=['nav', 'navbar'])
+                    nav = soup.find('nav') 或 soup.find(class_=['nav'， 'navbar'])
                     if nav:
                         elements_to_modify.append(nav)
 
-        if not elements_to_modify:
-            return PlainTextResponse("未找到与关键词对应的HTML部分。")
+        return elements_to_modify
 
-        # 构造HTML部分修改提示
-        parts_info = []
-        for element in elements_to_modify:
-            parent = element.find_parent()
-            parent_name = parent.name if parent else '根'
-            parts_info.append(f"""
-            位于{parent_name}中的{element.name}元素:
-            {str(element)}
-            """)
+    def _save_updated_html(self, html: str):
+        """保存更新后的HTML"""
+        with open('output.html'， 'w', encoding='utf-8') as f:
+            f.write(html)
+        self.html_parts = self.parse_html(html)
 
-        parts_text = "\n".join(parts_info)
-        modification_prompt = f"""
-        请根据以下要求修改HTML部分内容：
-        需要修改的元素:
-        {parts_text}
 
-        修改要求:
-        {request.content}
+# 创建全局HTML修改器实例
+html_modifier = HTMLModifier()
 
-        重要说明：
-        1。 保持元素的基本HTML结构不变
-        2。 只需返回修改后的完整HTML代码
-        3。 用```html包裹返回内容
 
-        示例：
-        ```html
-        <h2>修改后的内容</h2>
-        ```
-        """
-
-    print("发送给AI的提示:\n", modification_prompt)
-
+@app.post("/generate_html")
+async def generate_html(request: ChatRequest):
+    """生成HTML文件的API端点"""
     try:
-        modified_part = chat(modification_prompt)
-        print("AI返回:\n", modified_part)
-
-        if "```html" in modified_part:
-            new_part = modified_part.split("```html")[1].split("```")[0].strip()
-        elif "```" in modified_part:
-            new_part = modified_part.split("```")[1].strip()
-            if new_part.lower().startswith("html"):
-                new_part = new_part[4:].strip()
-        else:
-            return PlainTextResponse("AI返回格式不正确")
-
-        if "全部" in keywords:
-            updated_html = new_part
-        else:
-            # 精确替换HTML部分
-            updated_html = current_html
-            for element in elements_to_modify:
-                if element and str(element) in updated_html:
-                    updated_html = updated_html.replace(str(element), new_part, 1)
-                    break
-
-        # 保存文件
-        with open('output.html', 'w', encoding='utf-8') as f:
-            f.write(updated_html)
-
-        html_parts = parse_html(updated_html)
-        return PlainTextResponse("HTML部分修改成功！")
-
+        result = html_modifier.generate_html(request.content)
+        return PlainTextResponse(result)
     except Exception as e:
-        print(f"AI处理失败: {str(e)}")
-        return PlainTextResponse(f"处理请求时出错: {str(e)}")
+        return PlainTextResponse(f"生成HTML时出错: {str(e)}", status_code=500)
+
+
+@app.post("/modify_html_part")
+async def modify_html_part(request: ChatRequest):
+    """修改HTML部分的API端点"""
+    try:
+        result = html_modifier.modify_html_part(request.content)
+        return PlainTextResponse(result)
+    except Exception as e:
+        return PlainTextResponse(f"修改HTML时出错: {str(e)}", status_code=500)
 
 
 @app.post("/clear_conversation_history")
 async def clear_history():
-    global conversation_history, html_parts
-    conversation_history = []
-    html_parts = {}
+    """清空对话历史的API端点"""
+    html_modifier.clear_history()
     return PlainTextResponse("对话历史和HTML解析结果已清空。")
 
 
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run(app, host="0.0.0.0", port=8000)
