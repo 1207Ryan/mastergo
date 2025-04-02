@@ -1,28 +1,54 @@
-# 文心大模型 HTML 代码生成服务
+# 智能家居设备识别系统
 
-这是一个使用 FastAPI 构建的 Web 服务，用于调用百度文心大模型根据用户输入生成 HTML 代码，并将生成的代码保存到 `output.html` 文件中。
+本系统通过自然语言处理识别用户指令对应的智能家居设备，支持多AI模型后端（讯飞星火、百度千帆、豆包、DeepSeek）。
 
-## 功能概述
-- 用户通过向 `/generate_html` 接口发送 POST 请求，携带需要生成 HTML 代码的描述信息。
-- 服务会调用百度文心大模型获取生成的代码，并从中提取 HTML 代码块。
-- 最后将提取的 HTML 代码保存到 `output.html` 文件中。
+## 功能特性
 
-## 安装依赖
-在项目根目录下执行以下命令安装所需依赖：pip install -r requirements.txt
-## 配置信息
-在代码中需要配置百度 API 的客户端 ID 和客户端密钥：# 在 get_access_token 函数中
-url = ("https://aip.baidubce.com/oauth/2.0/token"
-       "?client_id=jC0epDHTtFr1CyUjwwg1fxrl"  # 替换为你的客户端 ID
-       "&client_secret=Uin2fK6r0MklQheJA9Gxgyk6uJ79f7Rz"  # 替换为你的客户端密钥
-       "&grant_type=client_credentials")
-## 运行服务
-在项目根目录下执行以下命令启动 FastAPI 服务：uvicorn qianfan:app --reload
+- 从自然语言指令中精准识别家居设备
+- 支持多AI模型后端：
+  - 讯飞星火（Spark AI）
+  - 百度千帆（Qianfan）
+  - 字节豆包（Volcengine Ark）
+  - DeepSeek
+- 智能维护对话历史上下文
+- 易于扩展新的AI服务提供商
 
-## 使用方法
-向 `http://127.0.0.1:8000/generate_html` 发送 POST 请求，请求体为 JSON 格式，包含 `content` 字段，示例如下：{
-    "content": "生成一个简单的 HTML 页面，包含一个标题和一个段落。"
-}
-## 响应结果
-- 如果成功生成 HTML 文件，响应为 `HTML 文件已成功生成。`
-- 如果调用文心大模型失败，响应为相应的错误信息。
-- 如果未找到 HTML 代码块，响应为 `未找到 HTML 代码块。`    
+## 安装指南
+
+1. 克隆本仓库
+2. 安装依赖：
+   ```bash
+   pip install -r requirements.txt
+配置环境变量（见配置说明）
+
+## 配置说明
+创建 .env 文件并配置以下API密钥：
+
+SPARK_API_KEY=您的星火API密钥
+SPARK_SECRET_KEY=您的星火密钥
+QIANFAN_API_KEY=您的千帆API密钥
+QIANFAN_SECRET_KEY=您的千帆密钥
+ARK_API_KEY=您的豆包API密钥
+DS_API_KEY=您的DeepSeek密钥
+
+## 使用方式
+运行主程序：
+python main.py
+示例交互：
+
+用户输入（输入退出来结束）: 房间太热了
+需要操作的设备: 空调 电风扇
+
+## 支持设备列表
+系统可识别以下设备：
+
+空调、灯光、窗帘、电视、热水器、加湿器、除湿机、扫地机器人、洗衣机
+
+烘干机、冰箱、烤箱、微波炉、电饭煲、净水器、空气净化器、新风系统
+
+智能门锁、摄像头、插座、电风扇、暖气、浴霸、智能马桶、投影仪、电热毯
+
+
+
+
+---
