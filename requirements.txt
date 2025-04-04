@@ -1,16 +1,18 @@
-# 基础依赖
-python-dotenv>=1.0.0  # 环境变量管理（用于读取.env文件）
-requests>=2.31.0      # HTTP请求库（千帆API调用必需）
+python>=3.8
+requests>=2.28.0
+python-dotenv>=0.21.0
+dataclasses-json>=0.5.7
+volcenginesdkarkruntime>=1.0.1
 
-# 讯飞星火AI
-sparkai>=0.1.0        # 官方SDK（注意：可能需要通过 pip install git+https://... 安装）
+# AI平台SDK
+sparkai>=0.1.0
+qianfan>=0.1.0
 
-# 字节豆包/火山引擎
-volcenginesdkarkruntime>=0.1.0  # 官方SDK（需确认安装源）
+# 开发工具
+pytest>=7.2.0
+mypy>=0.991
+black>=22.10.0
 
-# 百度千帆
-qianfan>=1.0.0       # 可选（如果使用官方SDK替代原生HTTP请求）
-
-# 开发工具（可选）
-black>=23.0.0         # 代码格式化
-pytest>=7.0.0         # 单元测试
+# 可选依赖（如需数据库支持）
+# pymongo>=4.3.3
+# sqlalchemy>=2.0.0
