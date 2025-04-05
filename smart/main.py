@@ -3,20 +3,20 @@ import json
 import time
 from datetime import datetime
 from typing import Dict, List, Optional, Union
-from dataclasses import dataclass, field
+from dataclasses import field
 import requests
-from prompt import PROMPT
+from prompt import *
 from sparkai.llm.llm import ChatSparkLLM, ChunkPrintHandler
 from sparkai.core.messages import ChatMessage
 from volcenginesdkarkruntime import Ark
-import keyword_matcher
-from keyword_matcher import *
 
 
 class DialogHistory:
     def __init__(self, max_length: int = 3):
         self.history: List[Dict] = []
         self.max_length = max_length
+        self.current_scene: Optional[str] = None  # 明确标注可为None
+        self.scene_persist_counter = 0  # 场景持续计数器
 
     def add(self, user_input: str, response: list) -> None:
         self.history.append({
@@ -32,6 +32,33 @@ class DialogHistory:
             f"用户:{item['user']}\n系统:{item['system']}"
             for item in self.history
         )
+
+    def detect_scene(self, user_input: str) -> Optional[str]:
+        """实时场景检测（单条触发机制）"""
+        if self.current_scene is not None:
+            self.scene_persist_counter -= 1  # 每轮无匹配递减
+            return self.current_scene
+
+        # 清空场景的条件（计数器归零或没有设备匹配）
+        if self.scene_persist_counter <= 0:
+            self.current_scene = None
+
+        # 实时关键词检测
+        detected_scene = None
+        for scene, keywords in SCENE_KEYWORDS.items():
+            if any(keyword in user_input for keyword in keywords):
+                detected_scene = scene
+                break
+
+        # 更新场景状态
+        if detected_scene:
+            self.current_scene = detected_scene
+            self.scene_persist_counter = self.max_length  # 设置几轮对话的持续期
+
+        return self.current_scene
+
+    def force_exit_scene(self):
+        self.current_scene = None
 
 
 history = DialogHistory()
@@ -73,140 +100,44 @@ class UserProfile:
         self.device_usage[device_name] = self.device_usage.get(device_name, 0) + 1
 
     def save_to_file(self, filepath: str):
-        """保存用户数据到文件"""
-        with open(filepath, 'w') as f:
-            json.dump({
-                'age': self.age,
-                'device_usage': self.device_usage,
-                # 其他需要保存的字段...
-            }, f)
+        """保存完整用户数据"""
+        data = {
+            "basic_info": {
+                "age": self.age,
+                "gender": self.gender,
+                "region": self.region,
+            },
+            "family_info": {
+                "family_members": self.family_members,
+                "has_children": self.has_children,
+                "has_elderly": self.has_elderly,
+                "has_pet": self.has_pet,
+            },
+            "device_data": {
+                "usage": self.device_usage,
+            }
+        }
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
 
     @classmethod
     def load_from_file(cls, filepath: str):
-        """从文件加载用户数据"""
+        """从文件加载完整数据"""
         try:
-            with open(filepath) as f:
+            with open(filepath, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 return cls(
-                    age=data.get('age'),
-                    device_usage=data.get('device_usage', {}),
-                    # 其他字段...
+                    age=data["basic_info"].get("age"),
+                    gender=data["basic_info"].get("gender"),
+                    region=data["basic_info"].get("region"),
+                    family_members=data["family_info"].get("family_members", 1),
+                    has_children=data["family_info"].get("has_children", False),
+                    has_elderly=data["family_info"].get("has_elderly", False),
+                    has_pet=data["family_info"].get("has_pet", False),
+                    device_usage=data["device_data"].get("usage", {})
                 )
-        except FileNotFoundError:
+        except (FileNotFoundError, json.JSONDecodeError, KeyError):
             return cls()  # 返回默认配置
-
-
-keyword_map = {
-    # 温度调节
-    "热": ["空调", "电风扇"],
-    "冷": ["空调", "暖气", "电热毯"],
-    "闷": ["空调", "新风系统"],
-    "凉": ["空调", "电风扇"],
-
-    # 饮食相关
-    "饿": ["电饭煲", "微波炉"],
-    "做饭": ["烤箱", "微波炉"],
-    "烧水": ["烧水壶", "热水器"],
-    "冷藏": ["冰箱"],
-    "渴": ["冰箱", "烧水壶"],
-    "喝": ["冰箱", "烧水壶"],
-
-    # 清洁场景
-    "扫地": ["扫地机器人"],
-    "脏": ["洗衣机", "烘干机"],
-    "洗衣": ["洗衣机", "烘干机"],
-    "除菌": ["空气净化器", "除湿机"],
-
-    # 洗浴场景
-    "洗澡": ["热水器", "浴霸"],
-    "洗漱": ["智能马桶", "热水器"],
-
-    # 安防场景
-    "锁门": ["智能门锁"],
-    "监控": ["摄像头"],
-
-    # 娱乐休闲
-    "看剧": ["电视", "投影仪"],
-    "听歌": ["电视"],  # 假设电视支持音响模式
-
-    # 睡眠场景
-    "困": ["电热毯", "灯光"],
-    "睡觉": ["电热毯", "灯光"],
-    "起床": ["窗帘", "灯光"],
-
-    # 特殊需求
-    "除湿": ["除湿机"],
-    "加湿": ["加湿器"],
-    "通风": ["新风系统", "空调"],
-
-    # 复合场景
-    "回家": ["智能门锁", "灯光", "空调"],
-    "出门": ["智能门锁", "灯光", "摄像头"],
-
-    # 宠物相关
-    "喂": ["自动喂食器"],
-}
-
-# 季节权重
-SEASON_DEVICE_MAP = {
-    "spring": ["空气净化器", "除湿机", "扫地机器人", "烧水壶", "洗衣机", "电风扇"],
-    "summer": ["空调", "电风扇", "冰箱", "除湿机", "净水器", "洗衣机"],
-    "autumn": ["加湿器", "空气净化器", "烘干机", "洗衣机", "烤箱"],
-    "winter": ["暖气", "空调", "电热毯", "浴霸", "智能马桶", "烧水壶", "加湿器", "热水器"],
-    "all_season": ["智能门锁", "摄像头", "微波炉", "烤箱", "电饭煲", "电视", "投影仪", "灯光", "插座"],
-}
-
-# 时间维度权重
-TIME_DEVICE_MAP = {
-    # weekday映射
-    "weekday": {
-        "morning": ["灯光", "智能马桶", "热水器", "烧水壶", "微波炉"],
-        "daytime": ["扫地机器人", "空气净化器"],
-        "evening": ["电视", "洗衣机", "热水器", "浴霸"],
-        "night": ["空调", "电热毯", "加湿器"]
-    },
-    # weekend映射
-    "weekend": {
-        "morning": ["咖啡机", "烤箱", "投影仪"],
-        "daytime": ["洗衣机", "烘干机", "游戏主机"],
-        "evening": ["洗碗机", "音响"],
-        "night": ["空调", "夜灯"]
-    }
-}
-
-# 地域特征映射
-REGION_DEVICE_MAP = {
-    "north": {
-        "winter": ["暖气", "加湿器", "空气净化器"],
-        "summer": ["空调", "电风扇"],
-        "all_season": ["新风系统"]
-    },
-    "south": {
-        "winter": ["电暖器", "除湿机", "电热毯"],
-        "summer": ["空调", "除湿机", "冰箱"],
-        "all_season": ["除湿机"]
-    }
-}
-
-# 家庭特征设备映射
-FAMILY_FEATURE_MAP = {
-    "has_children": ["智能门锁", "摄像头", "空气净化器"],
-    "has_elderly": ["智能马桶", "浴霸"],
-    "has_pet": ["自动喂食器"],
-}
-
-# 生活习惯映射
-LIFESTYLE_FEATURES_MAP = {
-    "cooking": {
-        "rare": ["微波炉", "烧水壶"],
-        "medium": ["电饭煲", "微波炉"],
-        "frequent": ["烤箱", "洗碗机", "净水器"]
-    },
-    "work_schedule": {
-        "night_shift": ["咖啡机", "夜灯"],
-        "flexible": ["投影仪", "音响"]
-    }
-}
 
 
 def get_seasonal_context() -> Dict[str, str]:
@@ -302,7 +233,7 @@ def match_keyword(text: str) -> Optional[list[str]]:
     """返回匹配到的设备列表，未匹配返回None"""
     text = text.lower()
     result = list()
-    for keyword, devices in keyword_map.items():
+    for keyword, devices in KEYWORD_MAP.items():
         if keyword in text:
             if len(devices) == 1:
                 result.append(devices[0])
@@ -401,18 +332,42 @@ def check_device(matched_devices: list) -> bool:
         return False
 
 
-def get_device(user_input: str, user_profile: UserProfile) -> str | list[str]:
-    # 1. 先尝试关键词匹配
+def get_device(user_input: str, user_profile: UserProfile) -> list[str] | str:
+    # 实时场景检测
+    current_scene = history.detect_scene(user_input)
+    if current_scene:
+        print("处于"+current_scene+"（输入结束场景来停止）")
+    # 先尝试关键词匹配
     matched_devices = match_keyword(user_input)
     # print(matched_devices)
-    if matched_devices:
-        # 2. 根据时间和用户画像选择最匹配的电器
+    # 场景敏感的设备过滤
+    if matched_devices and current_scene:
+        current_scene_devices = SCENE_DEVICE_MAP.get(current_scene, [])
+        filtered_devices = []
+        for device in matched_devices:
+            if isinstance(device, str):
+                if device in current_scene_devices:
+                    filtered_devices.append(device)
+            elif isinstance(device, list):
+                for dev in device:
+                    if dev in current_scene_devices:
+                        filtered_devices.append(dev)
+        matched_devices = filtered_devices
+        if matched_devices:
+            return matched_devices
+        if not matched_devices:  # 关键修改：无匹配立即退出场景
+            history.force_exit_scene()
+
+    # print(matched_devices)
+    if not matched_devices:
+        matched_devices = match_keyword(user_input)
+        # 根据时间和用户画像选择最匹配的电器
         matched_devices = recommend_devices(user_profile, matched_devices)
         # print(matched_devices)
-        if check_device(matched_devices):
-            return matched_devices
+        # if check_device(matched_devices):
+        #     return matched_devices
 
-    # 3. 无匹配则走AI流程
+    # 无匹配则走AI流程
     prompt = PROMPT.format(
         user_input=user_input,
     )
@@ -440,11 +395,18 @@ def main():
 
         if user_input.lower() in ("退出", "exit"):
             break
+        elif user_input.lower() in "结束场景":
+            history.force_exit_scene()
+            print("场景已结束")
+            continue
 
         device = get_device(user_input, user_profile)
         print(f"需要操作的设备: {device}")
         history.add(user_input, device)
+        for dev in device:
+            user_profile.record_device_usage(dev)
 
+    user_profile.save_to_file("user_profile.json")
 
 if __name__ == "__main__":
     main()
