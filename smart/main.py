@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Union
 from dataclasses import field
 import requests
-from prompt import *
+from znjj_prompts import *
 from sparkai.llm.llm import ChatSparkLLM, ChunkPrintHandler
 from sparkai.core.messages import ChatMessage
 from volcenginesdkarkruntime import Ark
@@ -169,65 +169,107 @@ def get_seasonal_context() -> Dict[str, str]:
 
 
 def recommend_devices(user: UserProfile, match_devices: List[Union[str, List[str]]]) -> List[str]:
-    """综合推荐设备，同组设备只选评分最高的"""
+    """使用层次分析法(AHP)综合推荐设备，同组设备只选评分最高的"""
     # 1. 获取当前上下文
     time_dict = get_seasonal_context()
     season = time_dict["season"]
     weekday = time_dict["weekday"]
     time = time_dict["time"]
 
-    # 2. 计算设备评分
-    device_scores = {}
+    # 2. 定义AHP层次结构和权重
+    """
+    层次结构：
+    - 目标层：选择最佳设备
+    - 准则层：
+        1. 地域特征（权重：0.3）
+        2. 家庭特征（权重：0.25）
+        3. 生活习惯（权重：0.2）
+        4. 时间相关（权重：0.15）
+        5. 使用频率（权重：0.1）
+    - 方案层：各候选设备
+    """
+    CRITERIA_WEIGHTS = {
+        'region': 0.3,
+        'family': 0.25,
+        'lifestyle': 0.2,
+        'time_related': 0.15,
+        'usage': 0.1
+    }
 
-    # 评分规则
-    def calculate_score(device: str) -> float:
-        score = 0.0
-        # 地域特征
+    # 3. 计算每个准则下的设备得分（归一化到0-1）
+    def calculate_ahp_score(device: str) -> float:
+        # 各准则下的原始得分
+        criteria_scores = {
+            'region': 0.0,
+            'family': 0.0,
+            'lifestyle': 0.0,
+            'time_related': 0.0,
+            'usage': 0.0
+        }
+
+        # 地域特征得分
         if device in REGION_DEVICE_MAP[user.region].get(season, []):
-            score += 3.0
-        # 家庭特征
-        for feature, devices in FAMILY_FEATURE_MAP.items():
-            if getattr(user, feature) and device in devices:
-                score += 2.5
-        # 生活习惯
-        if device in LIFESTYLE_FEATURES_MAP["cooking"][user.cooking_habits]:
-            score += 2.0
-        if user.work_schedule != "regular" and device in LIFESTYLE_FEATURES_MAP["work_schedule"][user.work_schedule]:
-            score += 1.5
-        # 时间相关
-        if device in SEASON_DEVICE_MAP[season]:
-            score += 1.0
-        if device in TIME_DEVICE_MAP[weekday][time]:
-            score += 1.0
-        # 使用频率
-        score += user.device_usage.get(device, 0) * 0.2
-        return score
+            criteria_scores['region'] = 1.0
 
-    # 3. 处理设备组
+        # 家庭特征得分
+        family_features = 0
+        matched_features = 0
+        for feature, devices in FAMILY_FEATURE_MAP.items():
+            family_features += 1
+            if getattr(user, feature) and device in devices:
+                matched_features += 1
+        if family_features > 0:
+            criteria_scores['family'] = matched_features / family_features
+
+        # 生活习惯得分
+        lifestyle_score = 0.0
+        # 烹饪习惯
+        if device in LIFESTYLE_FEATURES_MAP["cooking"][user.cooking_habits]:
+            lifestyle_score += 0.6  # 烹饪习惯权重60%
+        # 工作时间
+        if user.work_schedule != "regular" and device in LIFESTYLE_FEATURES_MAP["work_schedule"][user.work_schedule]:
+            lifestyle_score += 0.4  # 工作时间权重40%
+        criteria_scores['lifestyle'] = lifestyle_score
+
+        # 时间相关得分
+        time_score = 0.0
+        if device in SEASON_DEVICE_MAP[season]:
+            time_score += 0.5  # 季节权重50%
+        if device in TIME_DEVICE_MAP[weekday][time]:
+            time_score += 0.5  # 时间权重50%
+        criteria_scores['time_related'] = time_score
+
+        # 使用频率得分（归一化到0-1）
+        max_usage = max(user.device_usage.values()) if user.device_usage else 1
+        criteria_scores['usage'] = user.device_usage.get(device, 0) / max_usage if max_usage > 0 else 0
+
+        # 计算加权总分
+        total_score = sum(criteria_scores[criteria] * CRITERIA_WEIGHTS[criteria]
+                          for criteria in CRITERIA_WEIGHTS)
+        return total_score
+
+    # 4. 处理设备组
     result = []
     processed_groups = set()
 
     for group in match_devices:
         if isinstance(group, str):
             # 单个设备直接评分
-            score = calculate_score(group)
-            device_scores[group] = score
-            result.append(group)
+            score = calculate_ahp_score(group)
+            result.append((group, score))
         else:
             # 设备组转换为元组作为key
             group_key = tuple(sorted(group))
             if group_key not in processed_groups:
                 # 找出组内最高分设备
-                best_device = max(group, key=lambda d: calculate_score(d))
-                device_scores[best_device] = calculate_score(best_device)
-                result.append(best_device)
+                best_device = max(group, key=lambda d: calculate_ahp_score(d))
+                score = calculate_ahp_score(best_device)
+                result.append((best_device, score))
                 processed_groups.add(group_key)
 
-    # 4. 按评分排序
-    result.sort(key=lambda d: -device_scores.get(d, 0))
-
-    return result if result else None
-
+    # 5. 按评分排序并返回设备列表
+    result.sort(key=lambda x: -x[1])
+    return [device for device, score in result] if result else None
 
 def match_keyword(text: str) -> Optional[list[str]]:
     """返回匹配到的设备列表，未匹配返回None"""
@@ -257,8 +299,13 @@ def get_access_token() -> str:
 def chat_qianfan(content: str) -> str:
     """与百度千帆AI聊天并获取响应"""
     payload = json.dumps({
-        "messages": content,
-        "temperature": 0.5
+        "messages": [
+            {
+                "role": "user",
+                "content": content  # 用户输入的内容
+            }
+        ],
+        "temperature": 0.5  # 可选参数，控制生成结果的随机性
     })
 
     url = f"https://aip.baidubce.com/rpc/2.0/ai_custom/v1/wenxinworkshop/chat/completions_pro?access_token={get_access_token()}"
@@ -326,6 +373,8 @@ def chat_deepseek(content: str) -> str:
 
 
 def check_device(matched_devices: list) -> bool:
+    if matched_devices is None:
+        return False
     if all(isinstance(item, str) for item in matched_devices) is True:
         return True
     else:
@@ -335,8 +384,9 @@ def check_device(matched_devices: list) -> bool:
 def get_device(user_input: str, user_profile: UserProfile) -> list[str] | str:
     # 实时场景检测
     current_scene = history.detect_scene(user_input)
+    # print(current_scene)
     if current_scene:
-        print("处于"+current_scene+"（输入结束场景来停止）")
+        print("处于" + current_scene + "（输入结束场景来停止）")
     # 先尝试关键词匹配
     matched_devices = match_keyword(user_input)
     # print(matched_devices)
@@ -359,20 +409,25 @@ def get_device(user_input: str, user_profile: UserProfile) -> list[str] | str:
             history.force_exit_scene()
 
     # print(matched_devices)
-    if not matched_devices:
+    if not current_scene:
         matched_devices = match_keyword(user_input)
+        # print(matched_devices)
         # 根据时间和用户画像选择最匹配的电器
         matched_devices = recommend_devices(user_profile, matched_devices)
         # print(matched_devices)
-        # if check_device(matched_devices):
-        #     return matched_devices
+        if check_device(matched_devices):
+            return matched_devices
+
+        # 如果经过所有匹配流程还是没有设备
+    # if not matched_devices:
+    #     return ["未知设备"]
 
     # 无匹配则走AI流程
     prompt = PROMPT.format(
         user_input=user_input,
     )
 
-    response = chat_spark(prompt)
+    response = chat_qianfan(prompt)
     return response
 
 
@@ -407,6 +462,7 @@ def main():
             user_profile.record_device_usage(dev)
 
     user_profile.save_to_file("user_profile.json")
+
 
 if __name__ == "__main__":
     main()
